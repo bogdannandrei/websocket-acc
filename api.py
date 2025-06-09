@@ -97,6 +97,7 @@ class ConnectionManager:
         return R * c
 
 manager = ConnectionManager()
+app = FastAPI()
 
 @app.websocket("/ws/device")
 async def websocket_endpoint(websocket: WebSocket):
