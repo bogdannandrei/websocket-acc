@@ -5,6 +5,8 @@ import time
 import json
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
+import math
+from typing import Optional
 
 # Set up logging using Uvicorn for colored logs
 logging.basicConfig(
@@ -27,77 +29,91 @@ app = FastAPI()
 # Manager to handle WebSocket connections
 class ConnectionManager:
     def __init__(self):
-        self.active_connection: WebSocket = None  # type: ignore
+        self.active_connections: list[tuple[WebSocket, Optional[Device]]] = []
 
     async def connect(self, websocket: WebSocket):
-        logger.debug("Attempting to accept a new WebSocket connection.")
         await websocket.accept()
-        self.active_connection = websocket
-        logger.info("WebSocket connection established.")
+        self.active_connections.append((websocket, None))
+        logger.info(f"Connected new client. Total clients: {len(self.active_connections)}")
 
-        # Send a "200 OK" message to indicate successful connection
-        await self.active_connection.send_text("200 OK: Connection Established")
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections = [
+            (ws, dev) for (ws, dev) in self.active_connections if ws != websocket
+        ]
+        logger.info(f"Disconnected a client. Remaining clients: {len(self.active_connections)}")
 
-    def disconnect(self):
-        self.active_connection = None  # type: ignore
-        logger.info("WebSocket connection closed.")
+    def update_device_data(self, websocket: WebSocket, device: Device):
+        for idx, (ws, _) in enumerate(self.active_connections):
+            if ws == websocket:
+                self.active_connections[idx] = (websocket, device)
+                break
 
-    async def send_color_and_time(self, process_time: float):
-        colors = ["green", "yellow", "orange", "red"]
-        color = random.choice(colors)
-        logger.debug(f"Selected random color: {color}")
-        
-        # Create a JSON object with time and color
-        response = {
-            "time": f"{process_time:.4f}",
-            "color": color
-        }
+    def find_nearby_clients(self, device: Device, distance_threshold=100.0, heading_threshold=15.0):
+        nearby_clients = []
+        for ws, other in self.active_connections:
+            if other is None or other == device:
+                continue
+            distance = self._calculate_distance(device, other)
+            heading_diff = abs(device.heading - other.heading)
+            heading_diff = min(heading_diff, 360 - heading_diff)  # normalize
 
-        logger.debug("Sent data to the phone: {response}")
+            if distance <= distance_threshold and heading_diff <= heading_threshold:
+                nearby_clients.append(ws)
+        return nearby_clients
 
-        if self.active_connection:
-            await self.active_connection.send_text(json.dumps(response))
-            logger.info("Sent color and time to WebSocket client.")
+    def _calculate_distance(self, d1: Device, d2: Device):
+        # Haversine formula for distance between two lat/lon points
+        R = 6371000  # Earth radius in meters
+        phi1, phi2 = math.radians(d1.latitude), math.radians(d2.latitude)
+        d_phi = math.radians(d2.latitude - d1.latitude)
+        d_lambda = math.radians(d2.longitude - d1.longitude)
+
+        a = math.sin(d_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+        return R * c
 
 manager = ConnectionManager()
 
 @app.websocket("/ws/device")
 async def websocket_endpoint(websocket: WebSocket):
-    logger.debug("New WebSocket connection initiated.")
     await manager.connect(websocket)
     try:
         while True:
-            # Wait for new data from the WebSocket client
             data = await websocket.receive_json()
-            logger.debug(f"Received raw data from client: {data}")
-            start_time = time.time()  # Start timing process
 
-            # Ensure all expected keys are in the data
-            required_keys = ["heading", "latitude", "longitude", "distance"]
-            if not all(key in data for key in required_keys):
-                logger.error(f"Missing keys in incoming data: {data}")
-                continue  # Skip this iteration if any key is missing
-
-            # Process the device data and create the Device instance
             device_data = Device(
                 heading=data["heading"],
                 latitude=data["latitude"],
                 longitude=data["longitude"],
                 distance=data["distance"]
             )
-            logger.info(f"Processed device data: {device_data.__dict__}")
+            manager.update_device_data(websocket, device_data)
 
-            # Calculate process time
-            process_time = time.time() - start_time
-            
-            # Send the color and time back to the client
-            logger.debug(f"Process time: {process_time:.4f} seconds")
-            
-            await manager.send_color_and_time(process_time)
-            
-    
+            # Caută clienți apropiați
+            nearby_clients = manager.find_nearby_clients(device_data)
+
+            response = {
+                "status": "nearby_found" if nearby_clients else "no_nearby",
+                "nearby_count": len(nearby_clients)
+            }
+
+            await websocket.send_text(json.dumps(response))
+
+            # Optional: trimite notificare și către ceilalți din grup
+            for client_ws in nearby_clients:
+                try:
+                    await client_ws.send_text(json.dumps({
+                        "status": "paired_with",
+                        "lat": device_data.latitude,
+                        "lon": device_data.longitude
+                    }))
+                except Exception as e:
+                    logger.warning(f"Failed to notify nearby client: {e}")
+                    manager.disconnect(client_ws)
+
     except WebSocketDisconnect:
-        logger.warning("WebSocket client disconnected.")
-        manager.disconnect()
+        manager.disconnect(websocket)
     except Exception as e:
-        logger.error(f"An error occurred: {e}")
+        logger.error(f"Unexpected error: {e}")
+        manager.disconnect(websocket)
