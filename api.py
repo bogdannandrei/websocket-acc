@@ -46,6 +46,7 @@ class ConnectionManager:
         for idx, (ws, _) in enumerate(self.active_connections):
             if ws == websocket:
                 self.active_connections[idx] = (websocket, device)
+                logger.debug(f"Updated device data for websocket {ws}: {device.__dict__}")
                 break
 
     def find_nearby_clients(self, device: Device, distance_threshold=100.0, heading_threshold=15.0):
@@ -57,8 +58,14 @@ class ConnectionManager:
             heading_diff = abs(device.heading - other.heading)
             heading_diff = min(heading_diff, 360 - heading_diff)  # normalize
 
+            logger.debug(f"Comparing device at {device.latitude},{device.longitude} "
+                         f"to {other.latitude},{other.longitude} | Distance: {distance:.2f}m | "
+                         f"Heading diff: {heading_diff:.2f}°")
+
             if distance <= distance_threshold and heading_diff <= heading_threshold:
                 nearby_clients.append(ws)
+        logger.info(f"Found {len(nearby_clients)} nearby clients for device at "
+                    f"{device.latitude},{device.longitude}")
         return nearby_clients
 
     def _calculate_distance(self, d1: Device, d2: Device):
@@ -79,8 +86,14 @@ manager = ConnectionManager()
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
+        # Send initial connection established message
+        initial_msg = "200 OK: Connection Established"
+        logger.info(f"Sending initial connection message to client {websocket.client}")
+        await websocket.send_text(initial_msg)
+
         while True:
             data = await websocket.receive_json()
+            logger.debug(f"Received data from client {websocket.client}: {data}")
 
             device_data = Device(
                 heading=data["heading"],
@@ -97,22 +110,25 @@ async def websocket_endpoint(websocket: WebSocket):
                 "status": "nearby_found" if nearby_clients else "no_nearby",
                 "nearby_count": len(nearby_clients)
             }
-
+            logger.debug(f"Sending response to client {websocket.client}: {response}")
             await websocket.send_text(json.dumps(response))
 
             # Optional: trimite notificare și către ceilalți din grup
             for client_ws in nearby_clients:
                 try:
-                    await client_ws.send_text(json.dumps({
+                    notify_msg = {
                         "status": "paired_with",
                         "lat": device_data.latitude,
                         "lon": device_data.longitude
-                    }))
+                    }
+                    logger.debug(f"Notifying nearby client {client_ws.client} with {notify_msg}")
+                    await client_ws.send_text(json.dumps(notify_msg))
                 except Exception as e:
                     logger.warning(f"Failed to notify nearby client: {e}")
                     manager.disconnect(client_ws)
 
     except WebSocketDisconnect:
+        logger.info(f"Client disconnected: {websocket.client}")
         manager.disconnect(websocket)
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
