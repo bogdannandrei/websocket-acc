@@ -22,36 +22,44 @@ class Device:
         self.latitude = latitude
         self.longitude = longitude
         self.distance = distance
+        self.moved = False  # flag pentru miscare
 
-# FastAPI app instance
-app = FastAPI()
-
-# Manager to handle WebSocket connections
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: list[tuple[WebSocket, Optional[Device]]] = []
+        # active_connections: list of tuples (WebSocket, Device, last_position)
+        self.active_connections: list[tuple[WebSocket, Optional[Device], Optional[Device]]] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append((websocket, None))
+        self.active_connections.append((websocket, None, None))  # last_position None initial
         logger.info(f"Connected new client. Total clients: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections = [
-            (ws, dev) for (ws, dev) in self.active_connections if ws != websocket
+            (ws, dev, last_dev) for (ws, dev, last_dev) in self.active_connections if ws != websocket
         ]
         logger.info(f"Disconnected a client. Remaining clients: {len(self.active_connections)}")
 
-    def update_device_data(self, websocket: WebSocket, device: Device):
-        for idx, (ws, _) in enumerate(self.active_connections):
+    def update_device_data(self, websocket: WebSocket, new_device: Device):
+        for idx, (ws, old_device, last_device) in enumerate(self.active_connections):
             if ws == websocket:
-                self.active_connections[idx] = (websocket, device)
-                logger.debug(f"Updated device data for websocket {ws}: {device.__dict__}")
+                # Verifică dacă device s-a mișcat față de ultima poziție
+                moved = False
+                if last_device is not None:
+                    dist_moved = self._calculate_distance(new_device, last_device)
+                    moved = dist_moved >= 1.0  # prag 1 metru
+                    logger.debug(f"Device {ws.client} moved {dist_moved:.2f}m since last update")
+                else:
+                    moved = True  # prima dată considerăm că s-a mișcat
+
+                new_device.moved = moved
+                self.active_connections[idx] = (websocket, new_device, new_device)
+                logger.debug(f"Updated device data for websocket {ws}: {new_device.__dict__}")
                 break
 
     def find_nearby_clients(self, device: Device, distance_threshold=100.0, heading_threshold=15.0):
         nearby_clients = []
-        for ws, other in self.active_connections:
+        for ws, other, _ in self.active_connections:
             if other is None or other == device:
                 continue
             distance = self._calculate_distance(device, other)
@@ -63,7 +71,15 @@ class ConnectionManager:
                          f"Heading diff: {heading_diff:.2f}°")
 
             if distance <= distance_threshold and heading_diff <= heading_threshold:
-                nearby_clients.append(ws)
+                # Verifică dacă ambele device-uri s-au mișcat recent
+                if device.moved and other.moved:
+                    logger.info(f"Device at {device.latitude},{device.longitude} paired with device at "
+                                f"{other.latitude},{other.longitude} | Distance: {distance:.2f}m | "
+                                f"Heading diff: {heading_diff:.2f}°")
+                    nearby_clients.append(ws)
+                else:
+                    logger.info(f"Pairing ignored due to no movement: Device1 moved={device.moved}, Device2 moved={other.moved}")
+
         logger.info(f"Found {len(nearby_clients)} nearby clients for device at "
                     f"{device.latitude},{device.longitude}")
         return nearby_clients
