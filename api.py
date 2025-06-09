@@ -17,11 +17,11 @@ logger = logging.getLogger("uvicorn")
 
 # Define a class to represent the device's data
 class Device:
-    def __init__(self, heading: float, latitude: float, longitude: float, distance: float):
+    def __init__(self, heading: float, latitude: float, longitude: float, accuracy: float):
         self.heading = heading
         self.latitude = latitude
         self.longitude = longitude
-        self.distance = distance
+        self.accuracy = accuracy
         self.moved = False  # flag pentru miscare
 
 class ConnectionManager:
@@ -116,8 +116,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 heading=data["heading"],
                 latitude=data["latitude"],
                 longitude=data["longitude"],
-                distance=data["distance"]
+                accuracy=data["accuracy"]
             )
+
             manager.update_device_data(websocket, device_data)
 
             # Caută clienți apropiați
