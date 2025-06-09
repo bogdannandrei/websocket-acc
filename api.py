@@ -7,6 +7,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 import math
 from typing import Optional
+import os
 
 # Set up logging using Uvicorn for colored logs
 logging.basicConfig(
@@ -14,6 +15,8 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("uvicorn")
+
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 # Define a class to represent the device's data
 class Device:
@@ -52,7 +55,7 @@ class ConnectionManager:
                 else:
                     moved = True  # prima dată considerăm că s-a mișcat
 
-                new_device.moved = moved
+                new_device.moved = True
                 self.active_connections[idx] = (websocket, new_device, new_device)
                 logger.debug(f"Updated device data for websocket {ws}: {new_device.__dict__}")
                 break
@@ -72,7 +75,7 @@ class ConnectionManager:
 
             if distance <= distance_threshold and heading_diff <= heading_threshold:
                 # Verifică dacă ambele device-uri s-au mișcat recent
-                if device.moved and other.moved:
+                if TEST_MODE or (device.moved and other.moved):
                     logger.info(f"Device at {device.latitude},{device.longitude} paired with device at "
                                 f"{other.latitude},{other.longitude} | Distance: {distance:.2f}m | "
                                 f"Heading diff: {heading_diff:.2f}°")
