@@ -20,12 +20,13 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
 # Define a class to represent the device's data
 class Device:
-    def __init__(self, heading: float, latitude: float, longitude: float, accuracy: float):
+    def __init__(self, device_id: str, heading: float, latitude: float, longitude: float, accuracy: float):
+        self.device_id = device_id
         self.heading = heading
         self.latitude = latitude
         self.longitude = longitude
         self.accuracy = accuracy
-        self.moved = False  # flag pentru miscare
+        self.moved = False
 
 class ConnectionManager:
     def __init__(self):
@@ -67,24 +68,18 @@ class ConnectionManager:
                 continue
             distance = self._calculate_distance(device, other)
             heading_diff = abs(device.heading - other.heading)
-            heading_diff = min(heading_diff, 360 - heading_diff)  # normalize
+            heading_diff = min(heading_diff, 360 - heading_diff)
 
-            logger.debug(f"Comparing device at {device.latitude},{device.longitude} "
-                         f"to {other.latitude},{other.longitude} | Distance: {distance:.2f}m | "
-                         f"Heading diff: {heading_diff:.2f}°")
+            logger.debug(f"[{device.device_id}] vs [{other.device_id}] | Distance: {distance:.2f}m | Heading diff: {heading_diff:.2f}°")
 
             if distance <= distance_threshold and heading_diff <= heading_threshold:
-                # Verifică dacă ambele device-uri s-au mișcat recent
                 if TEST_MODE or (device.moved and other.moved):
-                    logger.info(f"Device at {device.latitude},{device.longitude} paired with device at "
-                                f"{other.latitude},{other.longitude} | Distance: {distance:.2f}m | "
-                                f"Heading diff: {heading_diff:.2f}°")
-                    nearby_clients.append(ws)
+                    logger.info(f"[{device.device_id}] paired with [{other.device_id}] | Distance: {distance:.2f}m | Heading diff: {heading_diff:.2f}°")
+                    nearby_clients.append((ws, distance, other.device_id))
                 else:
-                    logger.info(f"Pairing ignored due to no movement: Device1 moved={device.moved}, Device2 moved={other.moved}")
+                    logger.info(f"[{device.device_id}] pairing ignored: moved={device.moved}, other_moved={other.moved}")
 
-        logger.info(f"Found {len(nearby_clients)} nearby clients for device at "
-                    f"{device.latitude},{device.longitude}")
+        logger.info(f"[{device.device_id}] Found {len(nearby_clients)} nearby clients")
         return nearby_clients
 
     def _calculate_distance(self, d1: Device, d2: Device):
@@ -116,11 +111,13 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.debug(f"Received data from client {websocket.client}: {data}")
 
             device_data = Device(
+                device_id=data["device_id"],
                 heading=data["heading"],
                 latitude=data["latitude"],
                 longitude=data["longitude"],
                 accuracy=data["accuracy"]
             )
+
 
             manager.update_device_data(websocket, device_data)
 
@@ -131,21 +128,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 "status": "nearby_found" if nearby_clients else "no_nearby",
                 "nearby_count": len(nearby_clients)
             }
-            logger.debug(f"Sending response to client {websocket.client}: {response}")
+            logger.debug(f"[{device_data.device_id}] Sending response: {response}")
             await websocket.send_text(json.dumps(response))
 
-            # Optional: trimite notificare și către ceilalți din grup
-            for client_ws in nearby_clients:
+            for client_ws, distance, client_id in nearby_clients:
                 try:
                     notify_msg = {
                         "status": "paired_with",
-                        "lat": device_data.latitude,
-                        "lon": device_data.longitude
+                        "device_id": client_id,
+                        "distance": round(distance, 2)
                     }
-                    logger.debug(f"Notifying nearby client {client_ws.client} with {notify_msg}")
+                    logger.debug(f"[{device_data.device_id}] Notifying nearby client {client_id} with {notify_msg}")
                     await client_ws.send_text(json.dumps(notify_msg))
                 except Exception as e:
-                    logger.warning(f"Failed to notify nearby client: {e}")
+                    logger.warning(f"[{device_data.device_id}] Failed to notify client {client_id}: {e}")
                     manager.disconnect(client_ws)
 
     except WebSocketDisconnect:
