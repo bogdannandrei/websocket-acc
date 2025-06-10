@@ -1,24 +1,17 @@
 import logging
-import random
-import sys
-import time
-import json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import uvicorn
 import math
-from typing import Optional
+import json
+import time
 import os
+from typing import Optional
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-# Set up logging using Uvicorn for colored logs
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+# Logging setup
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("uvicorn")
 
 TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 
-# Define a class to represent the device's data
 class Device:
     def __init__(self, device_id: str, heading: float, latitude: float, longitude: float, accuracy: float):
         self.device_id = device_id
@@ -30,69 +23,73 @@ class Device:
 
 class ConnectionManager:
     def __init__(self):
-        # active_connections: list of tuples (WebSocket, Device, last_position)
         self.active_connections: list[tuple[WebSocket, Optional[Device], Optional[Device]]] = []
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append((websocket, None, None))  # last_position None initial
+        self.active_connections.append((websocket, None, None))
         logger.info(f"Connected new client. Total clients: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections = [
-            (ws, dev, last_dev) for (ws, dev, last_dev) in self.active_connections if ws != websocket
-        ]
+        self.active_connections = [(ws, dev, last) for ws, dev, last in self.active_connections if ws != websocket]
         logger.info(f"Disconnected a client. Remaining clients: {len(self.active_connections)}")
 
     def update_device_data(self, websocket: WebSocket, new_device: Device):
-        for idx, (ws, old_device, last_device) in enumerate(self.active_connections):
+        for i, (ws, _, last_dev) in enumerate(self.active_connections):
             if ws == websocket:
-                # Verifică dacă device s-a mișcat față de ultima poziție
                 moved = False
-                if last_device is not None:
-                    dist_moved = self._calculate_distance(new_device, last_device)
-                    moved = dist_moved >= 1.0  # prag 1 metru
-                    logger.debug(f"Device {ws.client} moved {dist_moved:.2f}m since last update")
+                if last_dev:
+                    dist = self._calculate_distance(new_device, last_dev)
+                    moved = dist >= 1.0
                 else:
-                    moved = True  # prima dată considerăm că s-a mișcat
-
-                new_device.moved = True
-                self.active_connections[idx] = (websocket, new_device, new_device)
-                logger.debug(f"Updated device data for websocket {ws}: {new_device.__dict__}")
+                    moved = True
+                new_device.moved = moved
+                self.active_connections[i] = (ws, new_device, new_device)
                 break
 
-    def find_nearby_clients(self, device: Device, distance_threshold=100.0, heading_threshold=15.0):
-        nearby_clients = []
-        for ws, other, _ in self.active_connections:
-            if other is None or other == device:
-                continue
-            distance = self._calculate_distance(device, other)
-            heading_diff = abs(device.heading - other.heading)
-            heading_diff = min(heading_diff, 360 - heading_diff)
+    def _calculate_distance(self, d1: Device, d2: Device) -> float:
+        R = 6371000
+        phi1 = math.radians(d1.latitude)
+        phi2 = math.radians(d2.latitude)
+        delta_phi = math.radians(d2.latitude - d1.latitude)
+        delta_lambda = math.radians(d2.longitude - d1.longitude)
 
-            logger.debug(f"[{device.device_id}] vs [{other.device_id}] | Distance: {distance:.2f}m | Heading diff: {heading_diff:.2f}°")
-
-            if distance <= distance_threshold and heading_diff <= heading_threshold:
-                if TEST_MODE or (device.moved and other.moved):
-                    logger.info(f"[{device.device_id}] paired with [{other.device_id}] | Distance: {distance:.2f}m | Heading diff: {heading_diff:.2f}°")
-                    nearby_clients.append((ws, distance, other.device_id))
-                else:
-                    logger.info(f"[{device.device_id}] pairing ignored: moved={device.moved}, other_moved={other.moved}")
-
-        logger.info(f"[{device.device_id}] Found {len(nearby_clients)} nearby clients")
-        return nearby_clients
-
-    def _calculate_distance(self, d1: Device, d2: Device):
-        # Haversine formula for distance between two lat/lon points
-        R = 6371000  # Earth radius in meters
-        phi1, phi2 = math.radians(d1.latitude), math.radians(d2.latitude)
-        d_phi = math.radians(d2.latitude - d1.latitude)
-        d_lambda = math.radians(d2.longitude - d1.longitude)
-
-        a = math.sin(d_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda/2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-
+        a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
         return R * c
+
+    def _heading_diff(self, h1: float, h2: float) -> float:
+        return min(abs(h1 - h2), 360 - abs(h1 - h2))
+
+    def find_paired_device(self, back_device: Device):
+        best_match = None
+        min_distance = float('inf')
+        for ws, front_device, _ in self.active_connections:
+            if not front_device or front_device.device_id == back_device.device_id:
+                continue
+
+            distance = self._calculate_distance(back_device, front_device)
+            heading_diff = self._heading_diff(back_device.heading, front_device.heading)
+
+            # Verifică dacă front_device e în fața back_device (în funcție de heading)
+            direction_ok = TEST_MODE or self._is_facing(front_device, back_device)
+
+            if distance <= 100.0 and (heading_diff <= 15.0 or TEST_MODE) and direction_ok:
+                if distance < min_distance:
+                    best_match = (ws, front_device, distance)
+                    min_distance = distance
+
+        return best_match
+
+    def _is_facing(self, front: Device, back: Device) -> bool:
+        # Între 150° și 210° față în față
+        angle_to_back = math.degrees(math.atan2(
+            back.longitude - front.longitude,
+            back.latitude - front.latitude
+        )) % 360
+
+        heading_diff = self._heading_diff(front.heading, angle_to_back)
+        return heading_diff <= 45
 
 manager = ConnectionManager()
 app = FastAPI()
@@ -101,16 +98,14 @@ app = FastAPI()
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
-        # Send initial connection established message
-        initial_msg = "200 OK: Connection Established"
-        logger.info(f"Sending initial connection message to client {websocket.client}")
-        await websocket.send_text(initial_msg)
+        await websocket.send_text("200 OK: Connection Established")
 
         while True:
+            start_time = time.time()
             data = await websocket.receive_json()
-            logger.debug(f"Received data from client {websocket.client}: {data}")
+            logger.debug(f"Received from {websocket.client}: {data}")
 
-            device_data = Device(
+            device = Device(
                 device_id=data["device_id"],
                 heading=data["heading"],
                 latitude=data["latitude"],
@@ -118,35 +113,32 @@ async def websocket_endpoint(websocket: WebSocket):
                 accuracy=data["accuracy"]
             )
 
+            manager.update_device_data(websocket, device)
+            paired_info = manager.find_paired_device(device)
 
-            manager.update_device_data(websocket, device_data)
+            api_time = int((time.time() - start_time) * 1000)
 
-            # Caută clienți apropiați
-            nearby_clients = manager.find_nearby_clients(device_data)
+            if paired_info:
+                _, paired_device, distance = paired_info
+                response = {
+                    "status": "paired",
+                    "pairing_data": {
+                        "device_id": paired_device.device_id,
+                        "distance": round(distance, 2)
+                    },
+                    "api_time": api_time
+                }
+            else:
+                response = {
+                    "status": "searching",
+                    "api_time": api_time
+                }
 
-            response = {
-                "status": "nearby_found" if nearby_clients else "no_nearby",
-                "nearby_count": len(nearby_clients)
-            }
-            logger.debug(f"[{device_data.device_id}] Sending response: {response}")
             await websocket.send_text(json.dumps(response))
 
-            for client_ws, distance, client_id in nearby_clients:
-                try:
-                    notify_msg = {
-                        "status": "paired_with",
-                        "device_id": client_id,
-                        "distance": round(distance, 2)
-                    }
-                    logger.debug(f"[{device_data.device_id}] Notifying nearby client {client_id} with {notify_msg}")
-                    await client_ws.send_text(json.dumps(notify_msg))
-                except Exception as e:
-                    logger.warning(f"[{device_data.device_id}] Failed to notify client {client_id}: {e}")
-                    manager.disconnect(client_ws)
-
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {websocket.client}")
+        logger.info(f"Disconnected: {websocket.client}")
         manager.disconnect(websocket)
     except Exception as e:
-        logger.error(f"Unexpected error: {e}")
+        logger.error(f"Error: {e}")
         manager.disconnect(websocket)
