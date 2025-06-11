@@ -136,7 +136,7 @@ app = FastAPI()
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
     try:
-        await ws.send_text("200 OK: Connected")
+        await ws.send_text("200 OK: Connection Established")
 
         while True:
             start = time.time()
