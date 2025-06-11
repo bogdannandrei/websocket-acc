@@ -4,6 +4,7 @@ import logging
 from typing import Optional, Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import orjson
+import numpy as np
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -24,14 +25,15 @@ class Device:
 
 # Efficient haversine function (precalculated constants)
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000  # radius in meters
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    R = 6371e3  # radius in meters
+    phi1 = np.radians(lat1)
+    phi2 = np.radians(lat2)
+    dphi = np.radians(lat2 - lat1)
+    dlambda = np.radians(lon2 - lon1)
 
+    a = np.sin(dphi/2)**2 + np.cos(phi1)*np.cos(phi2)*np.sin(dlambda/2)**2
+    c = 2*np.arctan2(np.sqrt(a), np.sqrt(1 - a))
+    return R * c
 # Connection manager to handle devices and pairings
 class ConnectionManager:
     def __init__(self, cell_size=0.01):
