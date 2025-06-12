@@ -157,3 +157,4 @@ async def websocket_endpoint(ws: WebSocket):
         logger.exception("WebSocket error.")
         if device_id:
             manager.disconnect(device_id)
+
