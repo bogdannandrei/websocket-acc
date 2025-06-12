@@ -107,9 +107,8 @@ manager = ConnectionManager()
 @app.websocket("/ws/device")
 async def websocket_endpoint(ws: WebSocket):
     await manager.connect(ws)
+    await ws.send_text("200 OK: Connection Established")
     try:
-        await ws.send_text("200 OK: Connection Established")
-
         while True:
             start = time.time()
             data = await ws.receive_json()
