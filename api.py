@@ -1,6 +1,7 @@
 import time
 import math
 import logging
+import asyncio
 from typing import Optional, Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import orjson
@@ -19,6 +20,16 @@ class Device:
         self.latitude = latitude
         self.longitude = longitude
         self.accuracy = accuracy
+
+# Helper for calculating distance
+
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 # Connection manager to handle devices and pairings
 class ConnectionManager:
@@ -42,7 +53,6 @@ class ConnectionManager:
                     del self.spatial_grid[cell_x][cell_y]
                 if not self.spatial_grid[cell_x]:
                     del self.spatial_grid[cell_x]
-            # Remove pairing
             self.pairings.pop(device.device_id, None)
 
     def _cell_coords(self, lat: float, lon: float):
@@ -54,24 +64,20 @@ class ConnectionManager:
             old_cell = self._cell_coords(old_device.latitude, old_device.longitude)
             new_cell = self._cell_coords(device.latitude, device.longitude)
             if old_cell != new_cell:
-                # Remove from old cell
                 if old_cell[0] in self.spatial_grid and old_cell[1] in self.spatial_grid[old_cell[0]]:
                     self.spatial_grid[old_cell[0]][old_cell[1]].discard(websocket)
                     if not self.spatial_grid[old_cell[0]][old_cell[1]]:
                         del self.spatial_grid[old_cell[0]][old_cell[1]]
                     if not self.spatial_grid[old_cell[0]]:
                         del self.spatial_grid[old_cell[0]]
-                # Add to new cell
                 self.spatial_grid.setdefault(new_cell[0], {}).setdefault(new_cell[1], set()).add(websocket)
         else:
-            # New device, add to spatial grid
             cell = self._cell_coords(device.latitude, device.longitude)
             self.spatial_grid.setdefault(cell[0], {}).setdefault(cell[1], set()).add(websocket)
 
         self.active_connections[websocket] = device
 
     def find_pair(self, device: Device) -> Optional[Device]:
-        # Return already paired device if exists
         if device.device_id in self.pairings:
             paired_id = self.pairings[device.device_id]
             for ws, dev in self.active_connections.items():
@@ -80,8 +86,6 @@ class ConnectionManager:
 
         cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
         nearby_devices = []
-
-        # Check neighbors including current cell for candidates
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 cx, cy = cell_x + dx, cell_y + dy
@@ -94,13 +98,26 @@ class ConnectionManager:
             other = self.active_connections[ws]
             if not other or other.device_id == device.device_id:
                 continue
-
-            # Pair devices
             self.pairings[device.device_id] = other.device_id
             self.pairings[other.device_id] = device.device_id
+            logger.info(f"Paired {device.device_id} with {other.device_id}")
             return other
 
         return None
+
+    async def validate_pair_async(self, device: Device):
+        paired_id = self.pairings.get(device.device_id)
+        if not paired_id:
+            return
+        for _, other in self.active_connections.items():
+            if other and other.device_id == paired_id:
+                distance = haversine(device.latitude, device.longitude, other.latitude, other.longitude)
+                heading_diff = abs(device.heading - other.heading)
+                if distance > 100 or heading_diff > 45:
+                    logger.info(f"Unpairing {device.device_id} and {other.device_id}: distance={distance:.2f}, heading_diff={heading_diff:.2f}")
+                    self.pairings.pop(device.device_id, None)
+                    self.pairings.pop(paired_id, None)
+                return
 
 manager = ConnectionManager()
 
@@ -123,6 +140,7 @@ async def websocket_endpoint(ws: WebSocket):
 
             manager.update_device(ws, dev)
             result = manager.find_pair(dev)
+            asyncio.create_task(manager.validate_pair_async(dev))
             elapsed = int((time.time() - start) * 1000)
 
             if result:
