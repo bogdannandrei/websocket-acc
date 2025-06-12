@@ -38,7 +38,7 @@ class PairingService:
         self.pairings[id1] = id2
         self.pairings[id2] = id1
 
-    def validate_pairing(self, device: Device):
+    async def validate_pairing(self, device: Device):
         peer_id = self.pairings.get(device.device_id)
         if not peer_id:
             return
