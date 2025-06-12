@@ -11,19 +11,22 @@ class PairingService:
         self.static_test_pairs = {("test1", "test2"), ("test2", "test1")}
 
     def pair_device(self, device: Device, candidates: list[Device]) -> Optional[Device]:
-        # Check if already paired
         if device.device_id in self.pairings:
             peer_id = self.pairings[device.device_id]
             return self.get_all_devices().get(peer_id)
 
-        # Static test pairs: always allow if the other is visible
         devices = self.get_all_devices()
+
+        # Check and pair static test devices whenever possible
         for id1, id2 in self.static_test_pairs:
-            if (device.device_id == id1 and id2 in devices) or (device.device_id == id2 and id1 in devices):
-                self._register_pair(id1, id2)
-                peer_id = id2 if device.device_id == id1 else id1
-                print(f"✅ Static test pairing: {device.device_id} <--> {peer_id}")
-                return devices[peer_id]
+            if device.device_id == id1 and id2 in devices:
+                self._register_pair(device.device_id, id2)
+                print(f"✅ Static test pairing: {device.device_id} <--> {id2}")
+                return devices[id2]
+            if device.device_id == id2 and id1 in devices:
+                self._register_pair(device.device_id, id1)
+                print(f"✅ Static test pairing: {device.device_id} <--> {id1}")
+                return devices[id1]
 
         # General pairing logic
         for other in candidates:
@@ -45,7 +48,7 @@ class PairingService:
 
     async def validate_pairing(self, device: Device):
         # Stub for future unpairing logic
-        return
+        pass
 
     def should_notify(self, device_id: str) -> bool:
         now = time.time()
