@@ -74,7 +74,7 @@ class ConnectionManager:
         return self.device_to_ws.get(device_id)
 
 manager = ConnectionManager()
-pairing_service = PairingService()
+pairing_service = PairingService(lambda: manager.active_connections)
 relay_service = RelayService(manager.device_to_ws)
 
 @app.websocket("/ws/device")
