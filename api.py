@@ -118,6 +118,7 @@ manager = ConnectionManager()
 @app.websocket("/ws/device")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
+    device_id = None  # <-- initialize here
     try:
         initial_data = await ws.receive_json()
         device = Device(
@@ -127,6 +128,7 @@ async def websocket_endpoint(ws: WebSocket):
             longitude=initial_data["longitude"],
             accuracy=initial_data["accuracy"]
         )
+        device_id = device.device_id  # <-- set device_id here
         await manager.connect(ws, device)
         await ws.send_text("200 OK: Connection Established")
 
@@ -135,7 +137,6 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             start = time.perf_counter()
             data = await ws.receive_json()
-            # If not paired, try to pair again (for dynamic pairing)
             if not paired_device_id:
                 manager.update_device(device)
                 paired_device_id = manager.find_pair(device)
@@ -146,16 +147,13 @@ async def websocket_endpoint(ws: WebSocket):
                         "api_time": elapsed
                     }).decode())
                     continue
-
-            # If paired, relay messages (optionally could include timing here as well)
             await manager.relay_message(device.device_id, data)
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
-        manager.disconnect(device.device_id)
-
-        logger.info("WebSocket disconnected.")
-        manager.disconnect(device.device_id)
+        if device_id:
+            manager.disconnect(device_id)
     except Exception as e:
         logger.exception("WebSocket error.")
-        manager.disconnect(device.device_id)
+        if device_id:
+            manager.disconnect(device_id)
