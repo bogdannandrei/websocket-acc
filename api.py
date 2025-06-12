@@ -123,6 +123,10 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     device_id = None
     try:
+        # Send "200 OK" IMMEDIATELY after accepting connection
+        await ws.send_text("200 OK: Connection Established")
+
+        # Now get the initial device info
         initial_data = await ws.receive_json()
         device = Device(
             device_id=initial_data["device_id"],
@@ -133,55 +137,54 @@ async def websocket_endpoint(ws: WebSocket):
         )
         device_id = device.device_id
         await manager.connect(ws, device)
-        await ws.send_text("200 OK: Connection Established")
 
         paired_device_id = manager.find_pair(device)
 
         while True:
-          data = await ws.receive_json()
-          start = time.perf_counter()  # start timer AFTER receiving
-      
-          # Always use the latest data to update device
-          device = Device(
-              device_id=data["device_id"],
-              heading=data["heading"],
-              latitude=data["latitude"],
-              longitude=data["longitude"],
-              accuracy=data["accuracy"]
-          )
-          manager.update_device(device)
-      
-          # Always run find_pair (static and proximity) on latest state
-          paired_device_id = manager.find_pair(device)
-          peer = manager.device_objs.get(paired_device_id) if paired_device_id else None
-          dist = None
-          heading_diff = None
-          if peer:
-              dist = haversine(device.latitude, device.longitude, peer.latitude, peer.longitude)
-              heading_diff = abs(device.heading - peer.heading)
-          elapsed = int((time.perf_counter() - start) * 1000)
-      
-          # Always respond to client with pairing status and peer info
-          if paired_device_id:
-              resp = {
-                  "status": "paired",
-                  "pairing_data": {
-                      "device_id": paired_device_id,
-                      "latitude": peer.latitude if peer else None,
-                      "longitude": peer.longitude if peer else None,
-                      "heading": peer.heading if peer else None,
-                      "distance": dist,
-                      "heading_diff": heading_diff
-                  },
-                  "api_time": elapsed
-              }
-              await ws.send_text(orjson.dumps(resp).decode())
-              await manager.relay_message(device.device_id, data)
-          else:
-              resp = {"status": "searching", "api_time": elapsed}
-              await ws.send_text(orjson.dumps(resp).decode())
+            data = await ws.receive_json()
+            start = time.perf_counter()  # start timer AFTER receiving
 
+            # Always use the latest data to update device
+            device = Device(
+                device_id=data["device_id"],
+                heading=data["heading"],
+                latitude=data["latitude"],
+                longitude=data["longitude"],
+                accuracy=data["accuracy"]
+            )
+            manager.update_device(device)
 
+            # Always run find_pair (static and proximity) on latest state
+            paired_device_id = manager.find_pair(device)
+            peer = manager.device_objs.get(paired_device_id) if paired_device_id else None
+            dist = None
+            heading_diff = None
+            if peer:
+                dist = haversine(device.latitude, device.longitude, peer.latitude, peer.longitude)
+                heading_diff = abs(device.heading - peer.heading)
+            elapsed = int((time.perf_counter() - start) * 1000)
+
+            # Always respond to client with pairing status and peer info
+            if paired_device_id:
+                resp = {
+                    "status": "paired",
+                    "pairing_data": {
+                        "device_id": paired_device_id,
+                        "latitude": peer.latitude if peer else None,
+                        "longitude": peer.longitude if peer else None,
+                        "heading": peer.heading if peer else None,
+                        "distance": dist,
+                        "heading_diff": heading_diff
+                    },
+                    "api_time": elapsed
+                }
+                await ws.send_text(orjson.dumps(resp).decode())
+                await manager.relay_message(device.device_id, data)
+            else:
+                resp = {"status": "searching", "api_time": elapsed}
+                await ws.send_text(orjson.dumps(resp).decode())
+
+    except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
         if device_id:
             manager.disconnect(device_id)
