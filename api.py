@@ -6,11 +6,13 @@ from typing import Optional, Dict
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import orjson
 
+from pairing_service import PairingService  # new module
+from relay_service import RelayService      # new module
+
 logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI()
 
-# Device class with proper optional typing
 class Device:
     __slots__ = ("device_id", "heading", "latitude", "longitude", "accuracy")
 
@@ -21,8 +23,6 @@ class Device:
         self.longitude = longitude
         self.accuracy = accuracy
 
-# Helper for calculating distance
-
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -31,14 +31,12 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-# Connection manager to handle devices and pairings
 class ConnectionManager:
     def __init__(self, cell_size=0.01):
         self.active_connections: Dict[WebSocket, Optional[Device]] = {}
+        self.device_to_ws: Dict[str, WebSocket] = {}
         self.spatial_grid: Dict[int, Dict[int, set[WebSocket]]] = {}
-        self.pairings: Dict[str, str] = {}
         self.cell_size = cell_size
-        self.test_mode_pairs = {("TEST_1", "TEST_2"), ("TEST_2", "TEST_1")}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -47,6 +45,7 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         device = self.active_connections.pop(websocket, None)
         if device:
+            self.device_to_ws.pop(device.device_id, None)
             cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
             if cell_x in self.spatial_grid and cell_y in self.spatial_grid[cell_x]:
                 self.spatial_grid[cell_x][cell_y].discard(websocket)
@@ -54,7 +53,6 @@ class ConnectionManager:
                     del self.spatial_grid[cell_x][cell_y]
                 if not self.spatial_grid[cell_x]:
                     del self.spatial_grid[cell_x]
-            self.pairings.pop(device.device_id, None)
 
     def _cell_coords(self, lat: float, lon: float):
         return (int(lat / self.cell_size), int(lon / self.cell_size))
@@ -77,22 +75,9 @@ class ConnectionManager:
             self.spatial_grid.setdefault(cell[0], {}).setdefault(cell[1], set()).add(websocket)
 
         self.active_connections[websocket] = device
+        self.device_to_ws[device.device_id] = websocket
 
-    def find_pair(self, device: Device) -> Optional[Device]:
-        # Test mode forced pairing
-        for ws, dev in self.active_connections.items():
-            if dev and (device.device_id, dev.device_id) in self.test_mode_pairs:
-                self.pairings[device.device_id] = dev.device_id
-                self.pairings[dev.device_id] = device.device_id
-                logger.info(f"[TEST MODE] Paired {device.device_id} with {dev.device_id}")
-                return dev
-
-        if device.device_id in self.pairings:
-            paired_id = self.pairings[device.device_id]
-            for ws, dev in self.active_connections.items():
-                if dev and dev.device_id == paired_id:
-                    return dev
-
+    def get_nearby_devices(self, device: Device):
         cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
         nearby_devices = []
         for dx in (-1, 0, 1):
@@ -100,37 +85,14 @@ class ConnectionManager:
                 cx, cy = cell_x + dx, cell_y + dy
                 if cx in self.spatial_grid and cy in self.spatial_grid[cx]:
                     nearby_devices.extend(self.spatial_grid[cx][cy])
+        return [self.active_connections[ws] for ws in nearby_devices if ws in self.active_connections]
 
-        for ws in nearby_devices:
-            if ws not in self.active_connections:
-                continue
-            other = self.active_connections[ws]
-            if not other or other.device_id == device.device_id:
-                continue
-            self.pairings[device.device_id] = other.device_id
-            self.pairings[other.device_id] = device.device_id
-            logger.info(f"Paired {device.device_id} with {other.device_id}")
-            return other
-
-        return None
-
-    async def validate_pair_async(self, device: Device):
-        paired_id = self.pairings.get(device.device_id)
-        if not paired_id:
-            return
-        if (device.device_id, paired_id) in self.test_mode_pairs:
-            return
-        for _, other in self.active_connections.items():
-            if other and other.device_id == paired_id:
-                distance = haversine(device.latitude, device.longitude, other.latitude, other.longitude)
-                heading_diff = abs(device.heading - other.heading)
-                if distance > 100 or heading_diff > 45:
-                    logger.info(f"Unpairing {device.device_id} and {other.device_id}: distance={distance:.2f}, heading_diff={heading_diff:.2f}")
-                    self.pairings.pop(device.device_id, None)
-                    self.pairings.pop(paired_id, None)
-                return
+    def get_websocket_by_device_id(self, device_id: str) -> Optional[WebSocket]:
+        return self.device_to_ws.get(device_id)
 
 manager = ConnectionManager()
+pairing_service = PairingService()
+relay_service = RelayService(manager.device_to_ws)
 
 @app.websocket("/ws/device")
 async def websocket_endpoint(ws: WebSocket):
@@ -150,25 +112,29 @@ async def websocket_endpoint(ws: WebSocket):
             )
 
             manager.update_device(ws, dev)
-            result = manager.find_pair(dev)
-            asyncio.create_task(manager.validate_pair_async(dev))
+            candidates = manager.get_nearby_devices(dev)
+            result = pairing_service.pair_device(dev, candidates)
+            asyncio.create_task(pairing_service.validate_pairing(dev))
+
             elapsed = int((time.time() - start) * 1000)
 
             if result:
-                resp = {
-                    "status": "paired",
+                notify = pairing_service.should_notify(dev.device_id)
+                response = {
+                    "status": "paired" if notify else "peer_update",
                     "pairing_data": {
                         "device_id": result.device_id,
                         "latitude": result.latitude,
                         "longitude": result.longitude,
                         "heading": result.heading
                     },
-                    "api_time": elapsed
+                    "api_time": elapsed,
+                    "sent_time": int(time.time() * 1000)
                 }
+                await ws.send_text(orjson.dumps(response).decode())
+                await relay_service.forward(dev, result.device_id)
             else:
-                resp = {"status": "searching", "api_time": elapsed}
-
-            await ws.send_text(orjson.dumps(resp).decode())
+                await ws.send_text(orjson.dumps({"status": "searching", "api_time": elapsed}).decode())
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
