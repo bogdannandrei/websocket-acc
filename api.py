@@ -139,6 +139,8 @@ async def websocket_endpoint(ws: WebSocket):
 
         paired_device_id = manager.find_pair(device)
 
+        paired = False
+
         while True:
             data = await ws.receive_json()
             start = time.perf_counter()  # start timer AFTER receiving
@@ -163,27 +165,35 @@ async def websocket_endpoint(ws: WebSocket):
                 heading_diff = abs(device.heading - peer.heading)
             elapsed = int((time.perf_counter() - start) * 1000)
 
-            # Always respond to client with pairing status and peer info
-            if paired_device_id:
-                resp = {
-                    "status": "paired",
-                    "pairing_data": {
-                        "device_id": paired_device_id,
-                        "latitude": peer.latitude if peer else None,
-                        "longitude": peer.longitude if peer else None,
-                        "heading": peer.heading if peer else None,
-                        "distance": dist,
-                        "heading_diff": heading_diff
-                    },
-                    "api_time": elapsed
-                }
-                await ws.send_text(orjson.dumps(resp).decode())
-                await manager.relay_message(device.device_id, data)
-            else:
+            if not paired_device_id:
                 resp = {"status": "searching", "api_time": elapsed}
                 await ws.send_text(orjson.dumps(resp).decode())
+                paired = False
+            else:
+                if not paired:
+                    # Send "paired" response ONLY ONCE when pairing occurs
+                    resp = {
+                        "status": "paired",
+                        "pairing_data": {
+                            "device_id": paired_device_id,
+                            "latitude": peer.latitude if peer else None,
+                            "longitude": peer.longitude if peer else None,
+                            "heading": peer.heading if peer else None,
+                            "distance": dist,
+                            "heading_diff": heading_diff
+                        },
+                        "api_time": elapsed
+                    }
+                    await ws.send_text(orjson.dumps(resp).decode())
+                    paired = True
+                # From now on, relay messages only; do NOT send another paired status
+                await manager.relay_message(device.device_id, data)
 
     except WebSocketDisconnect:
+        logger.info("WebSocket disconnected.")
+        if device_id:
+            manager.disconnect(device_id)
+
         logger.info("WebSocket disconnected.")
         if device_id:
             manager.disconnect(device_id)
