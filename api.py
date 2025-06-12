@@ -9,9 +9,9 @@ logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI()
 
-# Device class with proper optional typing for last_distance and last_heading
+# Device class with proper optional typing
 class Device:
-    __slots__ = ("device_id", "heading", "latitude", "longitude", "accuracy", "last_distance", "last_heading")
+    __slots__ = ("device_id", "heading", "latitude", "longitude", "accuracy")
 
     def __init__(self, device_id: str, heading: float, latitude: float, longitude: float, accuracy: float):
         self.device_id = device_id
@@ -19,24 +19,13 @@ class Device:
         self.latitude = latitude
         self.longitude = longitude
         self.accuracy = accuracy
-        self.last_distance: Optional[float] = None
-        self.last_heading: Optional[float] = None
-
-# Efficient haversine function (precalculated constants)
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000  # radius in meters
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 # Connection manager to handle devices and pairings
 class ConnectionManager:
     def __init__(self, cell_size=0.01):
         self.active_connections: Dict[WebSocket, Optional[Device]] = {}
         self.spatial_grid: Dict[int, Dict[int, set[WebSocket]]] = {}
+        self.pairings: Dict[str, str] = {}
         self.cell_size = cell_size
 
     async def connect(self, websocket: WebSocket):
@@ -53,6 +42,8 @@ class ConnectionManager:
                     del self.spatial_grid[cell_x][cell_y]
                 if not self.spatial_grid[cell_x]:
                     del self.spatial_grid[cell_x]
+            # Remove pairing
+            self.pairings.pop(device.device_id, None)
 
     def _cell_coords(self, lat: float, lon: float):
         return (int(lat / self.cell_size), int(lon / self.cell_size))
@@ -79,7 +70,14 @@ class ConnectionManager:
 
         self.active_connections[websocket] = device
 
-    def find_pair(self, device: Device) -> Optional[tuple[Device, float]]:
+    def find_pair(self, device: Device) -> Optional[Device]:
+        # Return already paired device if exists
+        if device.device_id in self.pairings:
+            paired_id = self.pairings[device.device_id]
+            for ws, dev in self.active_connections.items():
+                if dev and dev.device_id == paired_id:
+                    return dev
+
         cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
         nearby_devices = []
 
@@ -90,9 +88,6 @@ class ConnectionManager:
                 if cx in self.spatial_grid and cy in self.spatial_grid[cx]:
                     nearby_devices.extend(self.spatial_grid[cx][cy])
 
-        closest_device = None
-        min_dist = float('inf')
-
         for ws in nearby_devices:
             if ws not in self.active_connections:
                 continue
@@ -100,15 +95,11 @@ class ConnectionManager:
             if not other or other.device_id == device.device_id:
                 continue
 
-            dist = haversine(device.latitude, device.longitude, other.latitude, other.longitude)
-            if dist < min_dist and dist <= 50:  # threshold in meters
-                min_dist = dist
-                closest_device = other
+            # Pair devices
+            self.pairings[device.device_id] = other.device_id
+            self.pairings[other.device_id] = device.device_id
+            return other
 
-        if closest_device:
-            device.last_distance = min_dist
-            device.last_heading = closest_device.heading
-            return closest_device, min_dist
         return None
 
 manager = ConnectionManager()
@@ -136,12 +127,13 @@ async def websocket_endpoint(ws: WebSocket):
             elapsed = int((time.time() - start) * 1000)
 
             if result:
-                paired, dist = result
                 resp = {
                     "status": "paired",
                     "pairing_data": {
-                        "device_id": paired.device_id,
-                        "distance": round(dist, 2)
+                        "device_id": result.device_id,
+                        "latitude": result.latitude,
+                        "longitude": result.longitude,
+                        "heading": result.heading
                     },
                     "api_time": elapsed
                 }
