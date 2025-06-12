@@ -11,17 +11,19 @@ class PairingService:
         self.static_test_pairs = {("test1", "test2"), ("test2", "test1")}
 
     def pair_device(self, device: Device, candidates: list[Device]) -> Optional[Device]:
-        # Already paired: return the current peer if still available
+        # Check if already paired
         if device.device_id in self.pairings:
             peer_id = self.pairings[device.device_id]
-            peer = self.get_all_devices().get(peer_id)
-            return peer
+            return self.get_all_devices().get(peer_id)
 
-        # Try static forced pairing (test1 <-> test2)
-        for other in candidates:
-            if (device.device_id, other.device_id) in self.static_test_pairs:
-                self._register_pair(device.device_id, other.device_id)
-                return other
+        # Check for static test pair
+        for id1, id2 in self.static_test_pairs:
+            if device.device_id == id1 and id2 in self.get_all_devices():
+                self._register_pair(id1, id2)
+                return self.get_all_devices()[id2]
+            if device.device_id == id2 and id1 in self.get_all_devices():
+                self._register_pair(id2, id1)
+                return self.get_all_devices()[id1]
 
         # General pairing logic
         for other in candidates:
@@ -33,24 +35,16 @@ class PairingService:
                 self._register_pair(device.device_id, other.device_id)
                 return other
 
-        # Optional fallback static test pairing if other peer is seen but missed above
-        for id1, id2 in self.static_test_pairs:
-            if device.device_id == id1 and id2 in self.get_all_devices():
-                self._register_pair(id1, id2)
-                return self.get_all_devices()[id2]
-            if device.device_id == id2 and id1 in self.get_all_devices():
-                self._register_pair(id2, id1)
-                return self.get_all_devices()[id1]
-
         return None
 
     def _register_pair(self, id1: str, id2: str):
-        self.pairings[id1] = id2
-        self.pairings[id2] = id1
-        print(f"🔗 Registered new pair: {id1} <--> {id2}")
+        if id1 not in self.pairings and id2 not in self.pairings:
+            self.pairings[id1] = id2
+            self.pairings[id2] = id1
+            print(f"🔗 Registered new pair: {id1} <--> {id2}")
 
     async def validate_pairing(self, device: Device):
-        # Stub for future unpairing logic (e.g. timeout or movement)
+        # Stub for future unpairing logic
         return
 
     def should_notify(self, device_id: str) -> bool:
