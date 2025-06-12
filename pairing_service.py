@@ -1,7 +1,7 @@
 import time
 from typing import Optional, Dict
 from collections import defaultdict
-from .api_spatial_filtering import Device, haversine
+from api_spatial_filtering import Device, haversine
 
 class PairingService:
     def __init__(self):
