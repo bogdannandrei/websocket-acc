@@ -9,6 +9,7 @@ logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI()
 
+# Device class with proper optional typing
 class Device:
     __slots__ = ("device_id", "heading", "latitude", "longitude", "accuracy")
 
@@ -19,142 +20,131 @@ class Device:
         self.longitude = longitude
         self.accuracy = accuracy
 
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000
-    phi1 = math.radians(lat1)
-    phi2 = math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
-    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
+# Connection manager to handle devices and pairings
 class ConnectionManager:
     def __init__(self, cell_size=0.01):
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.device_objs: Dict[str, Device] = {}
+        self.active_connections: Dict[WebSocket, Optional[Device]] = {}
+        self.spatial_grid: Dict[int, Dict[int, set[WebSocket]]] = {}
         self.pairings: Dict[str, str] = {}
-        self.spatial_grid: Dict[int, Dict[int, set[str]]] = {}
         self.cell_size = cell_size
-        self.static_pairs = {"test1": "test2", "test2": "test1"}
 
-    async def connect(self, websocket: WebSocket, device: Device):
+    async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections[device.device_id] = websocket
-        self.device_objs[device.device_id] = device
+        self.active_connections[websocket] = None
 
-        cell = self._cell_coords(device.latitude, device.longitude)
-        self.spatial_grid.setdefault(cell[0], {}).setdefault(cell[1], set()).add(device.device_id)
-
-    def disconnect(self, device_id: str):
-        ws = self.active_connections.pop(device_id, None)
-        device = self.device_objs.pop(device_id, None)
-        self.pairings.pop(device_id, None)
+    def disconnect(self, websocket: WebSocket):
+        device = self.active_connections.pop(websocket, None)
         if device:
             cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
             if cell_x in self.spatial_grid and cell_y in self.spatial_grid[cell_x]:
-                self.spatial_grid[cell_x][cell_y].discard(device_id)
+                self.spatial_grid[cell_x][cell_y].discard(websocket)
                 if not self.spatial_grid[cell_x][cell_y]:
                     del self.spatial_grid[cell_x][cell_y]
                 if not self.spatial_grid[cell_x]:
                     del self.spatial_grid[cell_x]
+            # Remove pairing
+            self.pairings.pop(device.device_id, None)
 
-    async def relay_message(self, sender_id: str, data: dict):
-        receiver_id = self.pairings.get(sender_id)
-        receiver_ws = self.active_connections.get(receiver_id)
-        if receiver_ws:
-            await receiver_ws.send_text(orjson.dumps(data).decode())
+    def _cell_coords(self, lat: float, lon: float):
+        return (int(lat / self.cell_size), int(lon / self.cell_size))
 
-    def update_device(self, device: Device):
-        self.device_objs[device.device_id] = device
+    def update_device(self, websocket: WebSocket, device: Device):
+        old_device = self.active_connections.get(websocket)
+        if old_device:
+            old_cell = self._cell_coords(old_device.latitude, old_device.longitude)
+            new_cell = self._cell_coords(device.latitude, device.longitude)
+            if old_cell != new_cell:
+                # Remove from old cell
+                if old_cell[0] in self.spatial_grid and old_cell[1] in self.spatial_grid[old_cell[0]]:
+                    self.spatial_grid[old_cell[0]][old_cell[1]].discard(websocket)
+                    if not self.spatial_grid[old_cell[0]][old_cell[1]]:
+                        del self.spatial_grid[old_cell[0]][old_cell[1]]
+                    if not self.spatial_grid[old_cell[0]]:
+                        del self.spatial_grid[old_cell[0]]
+                # Add to new cell
+                self.spatial_grid.setdefault(new_cell[0], {}).setdefault(new_cell[1], set()).add(websocket)
+        else:
+            # New device, add to spatial grid
+            cell = self._cell_coords(device.latitude, device.longitude)
+            self.spatial_grid.setdefault(cell[0], {}).setdefault(cell[1], set()).add(websocket)
 
-        # Update spatial grid if position changed
-        for cell_x in list(self.spatial_grid.keys()):
-            for cell_y in list(self.spatial_grid[cell_x].keys()):
-                if device.device_id in self.spatial_grid[cell_x][cell_y]:
-                    self.spatial_grid[cell_x][cell_y].remove(device.device_id)
-                    if not self.spatial_grid[cell_x][cell_y]:
-                        del self.spatial_grid[cell_x][cell_y]
-                    if not self.spatial_grid[cell_x]:
-                        del self.spatial_grid[cell_x]
-                    break
+        self.active_connections[websocket] = device
 
-        cell = self._cell_coords(device.latitude, device.longitude)
-        self.spatial_grid.setdefault(cell[0], {}).setdefault(cell[1], set()).add(device.device_id)
+    def find_pair(self, device: Device) -> Optional[Device]:
+        # Return already paired device if exists
+        if device.device_id in self.pairings:
+            paired_id = self.pairings[device.device_id]
+            for ws, dev in self.active_connections.items():
+                if dev and dev.device_id == paired_id:
+                    return dev
 
-    def find_pair(self, device: Device) -> Optional[str]:
-        # 1. Static pair logic for test1/test2
-        target_device_id = self.static_pairs.get(device.device_id)
-        if target_device_id and target_device_id in self.active_connections:
-            self.pairings[device.device_id] = target_device_id
-            self.pairings[target_device_id] = device.device_id
-            return target_device_id
-
-        # 2. Proximity logic for all other devices
         cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
-        nearby = set()
+        nearby_devices = []
+
+        # Check neighbors including current cell for candidates
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 cx, cy = cell_x + dx, cell_y + dy
                 if cx in self.spatial_grid and cy in self.spatial_grid[cx]:
-                    nearby.update(self.spatial_grid[cx][cy])
+                    nearby_devices.extend(self.spatial_grid[cx][cy])
 
-        for other_id in nearby:
-            if other_id == device.device_id or other_id in self.pairings:
+        for ws in nearby_devices:
+            if ws not in self.active_connections:
                 continue
-            other = self.device_objs[other_id]
-            dist = haversine(device.latitude, device.longitude, other.latitude, other.longitude)
-            heading_diff = abs(device.heading - other.heading)
-            if dist <= 50 and heading_diff < 45:
-                self.pairings[device.device_id] = other_id
-                self.pairings[other_id] = device.device_id
-                return other_id
-        return None
+            other = self.active_connections[ws]
+            if not other or other.device_id == device.device_id:
+                continue
 
-    def _cell_coords(self, lat: float, lon: float):
-        return (int(lat / self.cell_size), int(lon / self.cell_size))
+            # Pair devices
+            self.pairings[device.device_id] = other.device_id
+            self.pairings[other.device_id] = device.device_id
+            return other
+
+        return None
 
 manager = ConnectionManager()
 
 @app.websocket("/ws/device")
 async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    device_id = None  # <-- initialize here
+    await manager.connect(ws)
     try:
-        initial_data = await ws.receive_json()
-        device = Device(
-            device_id=initial_data["device_id"],
-            heading=initial_data["heading"],
-            latitude=initial_data["latitude"],
-            longitude=initial_data["longitude"],
-            accuracy=initial_data["accuracy"]
-        )
-        device_id = device.device_id  # <-- set device_id here
-        await manager.connect(ws, device)
         await ws.send_text("200 OK: Connection Established")
 
-        paired_device_id = manager.find_pair(device)
-
         while True:
-            start = time.perf_counter()
+            start = time.time()
             data = await ws.receive_json()
-            if not paired_device_id:
-                manager.update_device(device)
-                paired_device_id = manager.find_pair(device)
-                elapsed = int((time.perf_counter() - start) * 1000)
-                if not paired_device_id:
-                    await ws.send_text(orjson.dumps({
-                        "status": "searching",
-                        "api_time": elapsed
-                    }).decode())
-                    continue
-            await manager.relay_message(device.device_id, data)
+
+            dev = Device(
+                device_id=data["device_id"],
+                heading=data["heading"],
+                latitude=data["latitude"],
+                longitude=data["longitude"],
+                accuracy=data["accuracy"]
+            )
+
+            manager.update_device(ws, dev)
+            result = manager.find_pair(dev)
+            elapsed = int((time.time() - start) * 1000)
+
+            if result:
+                resp = {
+                    "status": "paired",
+                    "pairing_data": {
+                        "device_id": result.device_id,
+                        "latitude": result.latitude,
+                        "longitude": result.longitude,
+                        "heading": result.heading
+                    },
+                    "api_time": elapsed
+                }
+            else:
+                resp = {"status": "searching", "api_time": elapsed}
+
+            await ws.send_text(orjson.dumps(resp).decode())
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
-        if device_id:
-            manager.disconnect(device_id)
+        manager.disconnect(ws)
     except Exception as e:
         logger.exception("WebSocket error.")
-        if device_id:
-            manager.disconnect(device_id)
-
+        manager.disconnect(ws)
