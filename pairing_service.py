@@ -16,14 +16,14 @@ class PairingService:
             peer_id = self.pairings[device.device_id]
             return self.get_all_devices().get(peer_id)
 
-        # Check for static test pair
+        # Static test pairs: always allow if the other is visible
+        devices = self.get_all_devices()
         for id1, id2 in self.static_test_pairs:
-            if device.device_id == id1 and id2 in self.get_all_devices():
+            if (device.device_id == id1 and id2 in devices) or (device.device_id == id2 and id1 in devices):
                 self._register_pair(id1, id2)
-                return self.get_all_devices()[id2]
-            if device.device_id == id2 and id1 in self.get_all_devices():
-                self._register_pair(id2, id1)
-                return self.get_all_devices()[id1]
+                peer_id = id2 if device.device_id == id1 else id1
+                print(f"✅ Static test pairing: {device.device_id} <--> {peer_id}")
+                return devices[peer_id]
 
         # General pairing logic
         for other in candidates:
