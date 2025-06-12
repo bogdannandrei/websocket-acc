@@ -38,7 +38,6 @@ class ConnectionManager:
         self.static_pairs = {"test1": "test2", "test2": "test1"}
 
     async def connect(self, websocket: WebSocket, device: Device):
-        await websocket.accept()
         self.active_connections[device.device_id] = websocket
         self.device_objs[device.device_id] = device
 
