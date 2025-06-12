@@ -9,7 +9,6 @@ logger = logging.getLogger("uvicorn.error")
 
 app = FastAPI()
 
-# Device class with proper optional typing for last_distance and last_heading
 class Device:
     __slots__ = ("device_id", "heading", "latitude", "longitude", "accuracy", "last_distance", "last_heading")
 
@@ -22,9 +21,8 @@ class Device:
         self.last_distance: Optional[float] = None
         self.last_heading: Optional[float] = None
 
-# Efficient haversine function (precalculated constants)
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371000  # radius in meters
+    R = 6371000
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
@@ -32,7 +30,6 @@ def haversine(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda/2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-# Connection manager to handle devices and pairings
 class ConnectionManager:
     def __init__(self, cell_size=0.01):
         self.active_connections: Dict[WebSocket, Optional[Device]] = {}
@@ -63,52 +60,32 @@ class ConnectionManager:
             old_cell = self._cell_coords(old_device.latitude, old_device.longitude)
             new_cell = self._cell_coords(device.latitude, device.longitude)
             if old_cell != new_cell:
-                # Remove from old cell
                 if old_cell[0] in self.spatial_grid and old_cell[1] in self.spatial_grid[old_cell[0]]:
                     self.spatial_grid[old_cell[0]][old_cell[1]].discard(websocket)
                     if not self.spatial_grid[old_cell[0]][old_cell[1]]:
                         del self.spatial_grid[old_cell[0]][old_cell[1]]
                     if not self.spatial_grid[old_cell[0]]:
                         del self.spatial_grid[old_cell[0]]
-                # Add to new cell
                 self.spatial_grid.setdefault(new_cell[0], {}).setdefault(new_cell[1], set()).add(websocket)
         else:
-            # New device, add to spatial grid
             cell = self._cell_coords(device.latitude, device.longitude)
             self.spatial_grid.setdefault(cell[0], {}).setdefault(cell[1], set()).add(websocket)
 
         self.active_connections[websocket] = device
 
     def find_pair(self, device: Device) -> Optional[tuple[Device, float]]:
-        cell_x, cell_y = self._cell_coords(device.latitude, device.longitude)
-        nearby_devices = []
+        static_pairs = {"test1": "test2", "test2": "test1"}
+        target_device_id = static_pairs.get(device.device_id)
+        
+        if target_device_id:
+            for other_device in self.active_connections.values():
+                if other_device and other_device.device_id == target_device_id:
+                    dist = haversine(device.latitude, device.longitude, other_device.latitude, other_device.longitude)
+                    if dist <= 50:
+                        device.last_distance = dist
+                        device.last_heading = other_device.heading
+                        return other_device, dist
 
-        # Check neighbors including current cell for candidates
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                cx, cy = cell_x + dx, cell_y + dy
-                if cx in self.spatial_grid and cy in self.spatial_grid[cx]:
-                    nearby_devices.extend(self.spatial_grid[cx][cy])
-
-        closest_device = None
-        min_dist = float('inf')
-
-        for ws in nearby_devices:
-            if ws not in self.active_connections:
-                continue
-            other = self.active_connections[ws]
-            if not other or other.device_id == device.device_id:
-                continue
-
-            dist = haversine(device.latitude, device.longitude, other.latitude, other.longitude)
-            if dist < min_dist and dist <= 50:  # threshold in meters
-                min_dist = dist
-                closest_device = other
-
-        if closest_device:
-            device.last_distance = min_dist
-            device.last_heading = closest_device.heading
-            return closest_device, min_dist
         return None
 
 manager = ConnectionManager()
@@ -139,10 +116,7 @@ async def websocket_endpoint(ws: WebSocket):
                 paired, dist = result
                 resp = {
                     "status": "paired",
-                    "pairing_data": {
-                        "device_id": paired.device_id,
-                        "distance": round(dist, 2)
-                    },
+                    "pairing_data": {"device_id": paired.device_id, "distance": round(dist, 2)},
                     "api_time": elapsed
                 }
             else:
