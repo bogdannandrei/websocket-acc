@@ -83,6 +83,7 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.send_text("200 OK: Connection Established")
     try:
         while True:
+            start = time.time()
             data = await ws.receive_json()
 
             dev = Device(
@@ -93,13 +94,15 @@ async def websocket_endpoint(ws: WebSocket):
                 accuracy=data["accuracy"]
             )
 
-            start = time.perf_counter()
             manager.update_device(ws, dev)
-            candidates = manager.get_nearby_devices(dev)
-            result = pairing_service.pair_device(dev, candidates)
-            api_elapsed = int((time.perf_counter() - start) * 1000)
 
+            all_devices = list(manager.active_connections.values())
+            candidates = [d for d in all_devices if d and d.device_id != dev.device_id]
+
+            result = pairing_service.pair_device(dev, candidates)
             asyncio.create_task(pairing_service.validate_pairing(dev))
+
+            elapsed = int((time.time() - start) * 1000)
 
             if result:
                 notify = pairing_service.should_notify(dev.device_id)
@@ -111,13 +114,13 @@ async def websocket_endpoint(ws: WebSocket):
                         "longitude": result.longitude,
                         "heading": result.heading
                     },
-                    "api_time": api_elapsed,
+                    "api_time": elapsed,
                     "sent_time": int(time.time() * 1000)
                 }
                 await ws.send_text(orjson.dumps(response).decode())
                 await relay_service.forward(dev, result.device_id)
             else:
-                await ws.send_text(orjson.dumps({"status": "searching", "api_time": api_elapsed}).decode())
+                await ws.send_text(orjson.dumps({"status": "searching", "api_time": elapsed}).decode())
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected.")
